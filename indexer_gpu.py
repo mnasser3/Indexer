@@ -13,9 +13,6 @@ Key Features:
 - Target-space neighbor (TSN) polishing with GPU acceleration
 - Symmetry-aware loss functions with trimmed mean for robustness
 - Multi-problem optimization for processing multiple crystals in parallel
-
-Author: [Your Name]
-Date: December 2025
 """
 
 import time
