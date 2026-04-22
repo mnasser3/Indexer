@@ -1177,7 +1177,7 @@ def build_arg_parser():
         "--kappas",
         nargs="+",
         type=float,
-        default=[0.93, 0.90, 0.85, 0.81, 0.70, 0.60],
+        default=[0.93, 0.90, 0.3, 0.78, 0.54, 0.60],
         help="One kappa per try.",
     )
 
@@ -1189,9 +1189,9 @@ def build_arg_parser():
             "best1bin",
             "best1bin",
             "randtobest1bin",
+            "best1bin",
+            "best1bin",
             "randtobest1bin",
-            "best2bin",
-            "rand1bin",
         ],
         help="One DE strategy per try.",
     )
