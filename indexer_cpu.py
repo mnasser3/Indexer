@@ -23,6 +23,7 @@ from scipy.stats import qmc
 import gemmi
 from numba import njit
 import math
+import argparse
 
 
 # ==============================================================================
@@ -990,3 +991,319 @@ def global_optimize_via_de_prepared(
     Hp_final = babai_nearest_batched(R_B, M_final[None, :, :])[0]
     H_best = consts["U"] @ Hp_final
     return R_best, H_best, best_val, result.nit, result.message, result.success
+
+
+
+
+
+### making it an executable script with command-line interface
+
+def crystfel_check_single_lattice(Q: np.ndarray, R: np.ndarray, B_inv: np.ndarray, delta: float = 0.25):
+    """
+    Q: (N,3)
+    R: (3,3)
+    B_inv: (3,3)
+    """
+    n_feat = int(Q.shape[0])
+    if n_feat == 0:
+        return False, 0.0, 0, 0
+
+    U = (B_inv @ (R.T @ Q.T)).T  # (N,3)
+    D = np.abs(U - np.rint(U))
+    ok = np.all(D < delta, axis=1)
+
+    n_sane = int(ok.sum())
+    frac = n_sane / n_feat
+    return (frac >= 0.5), frac, n_sane, n_feat
+
+
+def unit_cell_to_B_and_Binv(unit_cell):
+    """
+    unit_cell: (a, b, c, alpha, beta, gamma)
+    """
+    uc = gemmi.UnitCell(*unit_cell)
+    B = np.array(uc.frac.mat).T.astype(np.float64)
+    B_inv = np.array(uc.orth.mat).T.astype(np.float64)
+    return B, B_inv
+
+
+def run_indexing_with_retries(
+    Q,
+    unit_cell,
+    kappas,
+    strategies,
+    *,
+    obj="mse_symm_trimmed_auto",
+    n_tries=6,
+    delta=0.25,
+    tol=3e-2,
+    maxiter=1500,
+    popsize=21,
+    polish=False,
+    updating="deferred",
+    workers=1,
+    init_mode="random",
+    seed_factor=3,
+    niche_radius_deg=3.2,
+    elite_per_niche=3,
+    immigrants_frac=0.10,
+    jitter_floor_deg=1.0,
+    jitter_scale=0.8,
+    callback_every=250,
+):
+    if n_tries <= 0:
+        raise ValueError("n_tries must be positive")
+    if len(kappas) != n_tries:
+        raise ValueError("Number of kappas must equal n_tries")
+    if len(strategies) != n_tries:
+        raise ValueError("Number of strategies must equal n_tries")
+
+    Q = np.asarray(Q, dtype=np.float64)
+    if Q.ndim != 2 or Q.shape[1] != 3:
+        raise ValueError(f"Q must have shape (N,3), got {Q.shape}")
+
+    Q_rows = Q          # (N,3) for acceptance check
+    Q_cols = Q.T        # (3,N) for optimizer
+
+    B, B_inv = unit_cell_to_B_and_Binv(unit_cell)
+    consts = prepare_constants(B, unit_cell)
+
+    attempts = []
+
+    for try_idx in range(n_tries):
+        kappa = float(kappas[try_idx])
+        strategy = str(strategies[try_idx])
+
+        R_est, H_est, err, nit, message, de_success = global_optimize_via_de_prepared(
+            Q_cols,
+            consts,
+            obj=obj,
+            kappa=kappa,
+            tol=tol,
+            maxiter=maxiter,
+            popsize=popsize,
+            polish=polish,
+            updating=updating,
+            workers=workers,
+            strategy=strategy,
+            init_mode=init_mode,
+            seed_factor=seed_factor,
+            niche_radius_deg=niche_radius_deg,
+            elite_per_niche=elite_per_niche,
+            immigrants_frac=immigrants_frac,
+            jitter_floor_deg=jitter_floor_deg,
+            jitter_scale=jitter_scale,
+            callback_every=callback_every,
+        )
+
+        passed, frac, n_sane, n_feat = crystfel_check_single_lattice(
+            Q_rows, R_est, B_inv, delta=delta
+        )
+
+        rec = {
+            "try_idx": try_idx,
+            "kappa": kappa,
+            "strategy": strategy,
+            "passed": bool(passed),
+            "frac": float(frac),
+            "n_sane": int(n_sane),
+            "n_feat": int(n_feat),
+            "err": float(err),
+            "nit": int(nit),
+            "message": str(message),
+            "de_success": bool(de_success),
+            "R_est": R_est.astype(np.float64),
+            "H_est": H_est.astype(np.int32),
+        }
+        attempts.append(rec)
+
+        print(
+            f"[try {try_idx + 1}/{n_tries}] "
+            f"strategy={strategy} kappa={kappa:.6f} "
+            f"passed={passed} frac={frac:.4f} "
+            f"n_sane={n_sane}/{n_feat} err={err:.6e} "
+            f"nit={nit} de_success={de_success}"
+        )
+
+        if passed:
+            return {
+                "accepted": True,
+                "accepted_try": try_idx,
+                "result": rec,
+                "attempts": attempts,
+            }
+
+    return {
+        "accepted": False,
+        "accepted_try": None,
+        "result": attempts[-1] if attempts else None,
+        "attempts": attempts,
+    }
+
+
+def build_arg_parser():
+    parser = argparse.ArgumentParser(
+        description="Run CPU crystal indexing with retry schedule over kappas and strategies."
+    )
+
+    parser.add_argument(
+        "--q-path",
+        required=True,
+        type=str,
+        help="Path to .npy file containing Q with shape (N,3).",
+    )
+    parser.add_argument(
+        "--unit-cell",
+        required=True,
+        nargs=6,
+        type=float,
+        metavar=("A", "B", "C", "ALPHA", "BETA", "GAMMA"),
+        help="Unit cell parameters: a b c alpha beta gamma",
+    )
+
+    parser.add_argument(
+        "--obj",
+        type=str,
+        default="mse_symm_trimmed_auto",
+    )
+    
+    parser.add_argument(
+        "--n-tries",
+        type=int,
+        default=6,
+    )
+
+    parser.add_argument(
+        "--kappas",
+        nargs="+",
+        type=float,
+        default=[0.93, 0.90, 0.85, 0.81, 0.70, 0.60],
+        help="One kappa per try.",
+    )
+
+    parser.add_argument(
+        "--strategies",
+        nargs="+",
+        type=str,
+        default=[
+            "best1bin",
+            "best1bin",
+            "randtobest1bin",
+            "randtobest1bin",
+            "best2bin",
+            "rand1bin",
+        ],
+        help="One DE strategy per try.",
+    )
+
+    parser.add_argument("--delta", type=float, default=0.25)
+    parser.add_argument("--tol", type=float, default=3e-2)
+    parser.add_argument("--maxiter", type=int, default=1500)
+    parser.add_argument("--popsize", type=int, default=21)
+    parser.add_argument("--polish", action="store_true")
+    parser.add_argument("--updating", type=str, default="deferred")
+    parser.add_argument("--workers", type=int, default=1)
+
+    parser.add_argument("--init-mode", type=str, default="random")
+    parser.add_argument("--seed-factor", type=int, default=3)
+    parser.add_argument("--niche-radius-deg", type=float, default=3.2)
+    parser.add_argument("--elite-per-niche", type=int, default=3)
+    parser.add_argument("--immigrants-frac", type=float, default=0.10)
+    parser.add_argument("--jitter-floor-deg", type=float, default=1.0)
+    parser.add_argument("--jitter-scale", type=float, default=0.8)
+    parser.add_argument("--callback-every", type=int, default=250)
+
+    parser.add_argument(
+        "--save-prefix",
+        type=str,
+        default=None,
+        help="Optional output prefix. Saves <prefix>_U.npy, <prefix>_H.npy, <prefix>_attempts.txt",
+    )
+
+    return parser
+
+
+def main():
+    parser = build_arg_parser()
+    args = parser.parse_args()
+
+    if args.q_path is None or str(args.q_path).strip() == "":
+        raise ValueError("--q-path is required")
+    if args.unit_cell is None or len(args.unit_cell) != 6:
+        raise ValueError("--unit-cell is required and must have 6 numbers")
+    if args.n_tries <= 0:
+        raise ValueError("--n-tries must be positive")
+    if len(args.kappas) != args.n_tries:
+        raise ValueError("Number of kappas must equal n_tries")
+    if len(args.strategies) != args.n_tries:
+        raise ValueError("Number of strategies must equal n_tries")
+
+    Q = np.load(args.q_path, mmap_mode="r")
+
+    out = run_indexing_with_retries(
+        Q=Q,
+        unit_cell=tuple(float(x) for x in args.unit_cell),
+        kappas=[float(x) for x in args.kappas],
+        strategies=[str(x) for x in args.strategies],
+        obj=args.obj,
+        n_tries=int(args.n_tries),
+        delta=float(args.delta),
+        tol=float(args.tol),
+        maxiter=int(args.maxiter),
+        popsize=int(args.popsize),
+        polish=bool(args.polish),
+        updating=str(args.updating),
+        workers=int(args.workers),
+        init_mode=str(args.init_mode),
+        seed_factor=int(args.seed_factor),
+        niche_radius_deg=float(args.niche_radius_deg),
+        elite_per_niche=int(args.elite_per_niche),
+        immigrants_frac=float(args.immigrants_frac),
+        jitter_floor_deg=float(args.jitter_floor_deg),
+        jitter_scale=float(args.jitter_scale),
+        callback_every=int(args.callback_every),
+    )
+
+    if out["accepted"]:
+        rec = out["result"]
+        print(
+            f"ACCEPTED on try {rec['try_idx'] + 1}/{args.n_tries}: "
+            f"strategy={rec['strategy']} kappa={rec['kappa']:.6f} "
+            f"frac={rec['frac']:.4f} n_sane={rec['n_sane']}/{rec['n_feat']}"
+        )
+    else:
+        rec = out["result"]
+        print("FAILED: no try satisfied crystfel acceptance criterion")
+        if rec is not None:
+            print(
+                f"Last try: strategy={rec['strategy']} kappa={rec['kappa']:.6f} "
+                f"frac={rec['frac']:.4f} n_sane={rec['n_sane']}/{rec['n_feat']}"
+            )
+
+    if args.save_prefix:
+        rec = out["result"]
+        if rec is not None:
+            np.save(f"{args.save_prefix}_U.npy", rec["R_est"], allow_pickle=False)
+            np.save(f"{args.save_prefix}_H.npy", rec["H_est"], allow_pickle=False)
+
+        with open(f"{args.save_prefix}_attempts.txt", "w") as f:
+            for rec_i in out["attempts"]:
+                f.write(
+                    f"try={rec_i['try_idx'] + 1} "
+                    f"strategy={rec_i['strategy']} "
+                    f"kappa={rec_i['kappa']:.6f} "
+                    f"passed={int(rec_i['passed'])} "
+                    f"frac={rec_i['frac']:.6f} "
+                    f"n_sane={rec_i['n_sane']} "
+                    f"n_feat={rec_i['n_feat']} "
+                    f"err={rec_i['err']:.12e} "
+                    f"nit={rec_i['nit']} "
+                    f"de_success={int(rec_i['de_success'])} "
+                    f"message={rec_i['message']}\n"
+                )
+
+
+if __name__ == "__main__":
+    main()
+    
+    
