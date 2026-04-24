@@ -33,7 +33,7 @@ GPU-accelerated implementation using PyTorch. This version provides significant 
 
 ```python
 for i in range(300,301):
-    q_path = f"/global/cfs/cdirs/lcls/mnasser/cxidb_62/Final_Qs/Q_chunk_{i:06d}.npy"
+    q_path = f"./Final_Qs/Q_chunk_{i:06d}.npy"
     Q = np.load(q_path)
     if Q.shape[0] >= 25:
         objec = "mse_symm_trimmed_auto"
@@ -112,7 +112,7 @@ LOGDIR = Path("indexer_logs")
 LOGDIR.mkdir(exist_ok=True)
 
 def run_one(i):
-    q_path = f"/global/cfs/cdirs/lcls/mnasser/cxidb_62/Final_Qs/Q_chunk_{i:06d}.npy"
+    q_path = f"./Final_Qs/Q_chunk_{i:06d}.npy"
     log_path = LOGDIR / f"chunk_{i:06d}.log"
     Q = np.load(q_path)
     if Q.shape[0] >= 25:
