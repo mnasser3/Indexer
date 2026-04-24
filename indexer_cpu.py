@@ -1210,7 +1210,7 @@ def build_arg_parser():
     parser.add_argument("--delta", type=float, default=0.25)
     parser.add_argument("--tol", type=float, default=3e-2)
     parser.add_argument("--maxiter", type=int, default=1500)
-    parser.add_argument("--popsize", type=int, default=21)
+    parser.add_argument("--popsize", type=int, default=24)
     parser.add_argument("--polish", action="store_true")
     parser.add_argument("--updating", type=str, default="deferred")
     parser.add_argument("--workers", type=int, default=1)
