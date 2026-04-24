@@ -507,7 +507,7 @@ def polish_R_smallN_tsn(
 
     for _ in range(max(1, int(steps))):
         # Rotate observed peaks to reciprocal lattice frame
-        A = R @ Q
+        A = R.T @ Q
         A_I = A[:, I]
         # Apply symmetry operations
         A_sym_I = np.einsum("sij,jn->sin", S_ops, A_I, optimize=True)
@@ -624,7 +624,7 @@ def hardest_peak_indices(R, Q, consts, K):
         Array of K peak indices with largest residuals
     """
     S_ops, PB_ops, R_B = consts["S_ops_stack"], consts["PB_ops_stack"], consts["R_B"]
-    A = R @ Q
+    A = R.T @ Q
     A_sym = np.einsum("sij,jn->sin", S_ops, A, optimize=True)
     H_b = babai_nearest_batched(R_B, A_sym)
     Y0  = np.einsum("sij,sjn->sin", PB_ops, H_b, optimize=True)
@@ -721,7 +721,7 @@ def prepare_constants(B, unit_cell, Hmax=6, delta_tsn=1):
     Q_B_T = Q_B.T
     # Get lattice symmetry operations and sort by trace (identity first)
     rot_mats = get_rots_mats_symm(unit_cell)
-    order = np.argsort([float(np.trace(R)) for R in rot_mats])
+    order = np.argsort([float(np.trace(R)) for R in rot_mats])[::-1]
     rot_mats = rot_mats[order]
     # Precompute symmetry operations in reduced and real space bases
     S_ops_stack  = np.stack([Q_B_T @ R_sym.T for R_sym in rot_mats], axis=0)
@@ -901,7 +901,6 @@ def global_optimize_via_de_prepared(
         gen_counter["g"] += 1
         
         # Determine callback frequency based on dataset size
-        gen_counter["g"] += 1
         if use_smallN:
             if (callback_every is None) or (gen_counter["g"] % max(1, int(callback_every)) != 0):
                 return False
@@ -1014,7 +1013,7 @@ def crystfel_check_single_lattice(Q: np.ndarray, R: np.ndarray, B_inv: np.ndarra
 
     n_sane = int(ok.sum())
     frac = n_sane / n_feat
-    return (frac >= 0.5), frac, n_sane, n_feat
+    return (frac >= 0.4), frac, n_sane, n_feat
 
 
 def unit_cell_to_B_and_Binv(unit_cell):
@@ -1033,7 +1032,7 @@ def run_indexing_with_retries(
     kappas,
     strategies,
     *,
-    obj="mse_symm_trimmed_auto",
+    obj,
     n_tries=6,
     delta=0.25,
     tol=3e-2,
@@ -1057,6 +1056,8 @@ def run_indexing_with_retries(
         raise ValueError("Number of kappas must equal n_tries")
     if len(strategies) != n_tries:
         raise ValueError("Number of strategies must equal n_tries")
+    if len(obj) != n_tries:
+        raise ValueError("Number of obj entries must equal n_tries")
 
     Q = np.asarray(Q, dtype=np.float64)
     if Q.ndim != 2 or Q.shape[1] != 3:
@@ -1073,11 +1074,12 @@ def run_indexing_with_retries(
     for try_idx in range(n_tries):
         kappa = float(kappas[try_idx])
         strategy = str(strategies[try_idx])
+        obj_c = str(obj[try_idx])
 
         R_est, H_est, err, nit, message, de_success = global_optimize_via_de_prepared(
             Q_cols,
             consts,
-            obj=obj,
+            obj=obj_c,
             kappa=kappa,
             tol=tol,
             maxiter=maxiter,
@@ -1163,8 +1165,17 @@ def build_arg_parser():
 
     parser.add_argument(
         "--obj",
+        nargs="+",
         type=str,
-        default="mse_symm_trimmed_auto",
+        default=[
+            "mse_symm_trimmed_auto",
+            "mse_symm_trimmed_auto",
+            "mse_symm_trimmed_auto",
+            "mse_symm_trimmed_auto",
+            "mse_symm",
+            "mse_symm",
+        ],
+        help="One objective per try.",
     )
     
     parser.add_argument(
@@ -1205,7 +1216,6 @@ def build_arg_parser():
     parser.add_argument("--workers", type=int, default=1)
 
     parser.add_argument("--init-mode", type=str, default="random")
-    parser.add_argument("--seed-factor", type=int, default=3)
     parser.add_argument("--niche-radius-deg", type=float, default=3.2)
     parser.add_argument("--elite-per-niche", type=int, default=3)
     parser.add_argument("--immigrants-frac", type=float, default=0.10)
@@ -1237,6 +1247,8 @@ def main():
         raise ValueError("Number of kappas must equal n_tries")
     if len(args.strategies) != args.n_tries:
         raise ValueError("Number of strategies must equal n_tries")
+    if len(args.obj) != args.n_tries:
+        raise ValueError("Number of obj entries must equal n_tries")
 
     Q = np.load(args.q_path, mmap_mode="r")
 
@@ -1245,7 +1257,7 @@ def main():
         unit_cell=tuple(float(x) for x in args.unit_cell),
         kappas=[float(x) for x in args.kappas],
         strategies=[str(x) for x in args.strategies],
-        obj=args.obj,
+        obj=[str(x) for x in args.obj],
         n_tries=int(args.n_tries),
         delta=float(args.delta),
         tol=float(args.tol),
@@ -1255,7 +1267,6 @@ def main():
         updating=str(args.updating),
         workers=int(args.workers),
         init_mode=str(args.init_mode),
-        seed_factor=int(args.seed_factor),
         niche_radius_deg=float(args.niche_radius_deg),
         elite_per_niche=int(args.elite_per_niche),
         immigrants_frac=float(args.immigrants_frac),
@@ -1267,7 +1278,7 @@ def main():
     if out["accepted"]:
         rec = out["result"]
         print(
-            f"ACCEPTED on try {rec['try_idx'] + 1}/{args.n_tries}: "
+            f"*HEURISTIC* accept on try {rec['try_idx'] + 1}/{args.n_tries}: "
             f"strategy={rec['strategy']} kappa={rec['kappa']:.6f} "
             f"frac={rec['frac']:.4f} n_sane={rec['n_sane']}/{rec['n_feat']}"
         )
